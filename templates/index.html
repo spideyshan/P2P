@@ -13,6 +13,14 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <style>
+    /* highlight selected alert row */
+    #alerts-tbody tr.selected { background: rgba(0, 123, 255, 0.08); }
+    #alerts-tbody tr { cursor: pointer; }
+    /* center node vulns styling */
+    #center-node-vulns .list-group-item { border: none; padding-left: 0; padding-right: 0; }
+    #center-node-vulns .list-group { max-height: 360px; overflow-y: auto; }
+  </style>
 </head>
 <body class="bg-light">
 
@@ -57,24 +65,20 @@
       <div class="card mb-3 shadow-sm">
         <div class="card-header">Vulnerability Summary</div>
         <div class="card-body">
-          <div class="d-flex align-items-center mb-2">
-            <div class="me-auto"><small class="text-muted">Total findings</small></div>
-            <div id="vuln-total" class="fw-bold">0</div>
-          </div>
-          <div class="progress mb-2" style="height:12px;">
-            <div id="vuln-progress" class="progress-bar bg-danger" role="progressbar" style="width:0%"></div>
-          </div>
+          <div class="fw-bold my-1">Total findings: <span id="vuln-total-count">0</span></div>
+
           <div class="small text-muted">Severity breakdown</div>
           <div class="d-flex gap-2 mt-2">
             <span class="badge bg-success" id="sev-low">Low: 0</span>
             <span class="badge bg-warning text-dark" id="sev-med">Med: 0</span>
             <span class="badge bg-danger" id="sev-high">High: 0</span>
           </div>
+
         </div>
       </div>
     </div>
 
-    <!-- CENTER: Alerts & details -->
+    <!-- CENTER: Alerts & central Node Vulnerabilities -->
     <div class="col-xl-6 col-lg-8">
       <div class="card mb-3 shadow-sm">
         <div class="card-header d-flex align-items-center">
@@ -87,21 +91,24 @@
               <thead class="table-light sticky-top">
                 <tr><th style="width:160px">Time</th><th>Node</th><th>Type</th><th style="width:100px">Severity</th></tr>
               </thead>
-              <tbody></tbody>
+              <tbody id="alerts-tbody"></tbody>
             </table>
           </div>
         </div>
       </div>
 
+      <!-- CENTRAL: Node Vulnerabilities (replaces Selected Alert Detail) -->
       <div class="card mb-3 shadow-sm">
-        <div class="card-header">Selected Alert Detail</div>
+        <div class="card-header">Node Vulnerabilities (center)</div>
         <div class="card-body">
-          <pre id="alert-detail" class="bg-dark text-light p-3 rounded" style="min-height:140px;">Click an alert to view details</pre>
+          <div id="center-node-vulns" style="min-height:140px;">
+            <p class="text-muted">Loading node vulnerabilities…</p>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- RIGHT: Charts & Node vulnerabilities -->
+    <!-- RIGHT: Charts (node vulnerabilities card removed) -->
     <div class="col-xl-3">
       <div class="card mb-3 shadow-sm">
         <div class="card-header">Attacks Over Time</div>
@@ -117,12 +124,8 @@
         </div>
       </div>
 
-      <div class="card mb-3 shadow-sm">
-        <div class="card-header">Node Vulnerabilities</div>
-        <div class="card-body small" id="node-vulns" style="max-height:300px; overflow:auto;">
-          <!-- vulnerability list populated by JS -->
-        </div>
-      </div>
+      <!-- Right-side 'Node Vulnerabilities' card removed as requested -->
+
     </div>
   </div>
 </main>
@@ -149,10 +152,354 @@
 
 <!-- Bootstrap JS -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-<!-- App JS -->
+<!-- App JS (your existing file) -->
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+<!-- Inline scripts: summary, alerts, center node vulns -->
+<script>
+  // ---------- Vulnerability Summary updater ----------
+  async function fetchAndUpdateSummary() {
+    try {
+      const res = await fetch('/api/summary');
+      if (!res.ok) {
+        console.warn('Failed to fetch /api/summary', res.status);
+        return;
+      }
+      const data = await res.json();
+      const vuln = data.vuln_summary || { total_findings: 0, by_severity: { low: 0, medium: 0, high: 0 } };
+
+      // Update total findings if element exists
+      const totalEl = document.getElementById('vuln-total-count');
+      if (totalEl) totalEl.textContent = vuln.total_findings ?? 0;
+
+      // Update severity badges
+      const lowEl = document.getElementById('sev-low');
+      const medEl = document.getElementById('sev-med');
+      const highEl = document.getElementById('sev-high');
+
+      if (lowEl) lowEl.textContent = `Low: ${vuln.by_severity?.low ?? 0}`;
+      if (medEl) medEl.textContent = `Med: ${vuln.by_severity?.medium ?? 0}`;
+      if (highEl) highEl.textContent = `High: ${vuln.by_severity?.high ?? 0}`;
+    } catch (err) {
+      console.error('Error updating vulnerability summary:', err);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    fetchAndUpdateSummary();
+    setInterval(fetchAndUpdateSummary, 30000); // every 30s
+  });
+</script>
+
+<script>
+  // ---------- Live Alerts rendering ----------
+  const ALERTS_POLL_INTERVAL_MS = 10000; // poll every 10s
+  const alertsTbody = document.getElementById('alerts-tbody');
+  const modalDetailEl = document.getElementById('modal-alert-detail');
+
+  function fmtTime(iso) {
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString();
+    } catch (e) {
+      return iso || '';
+    }
+  }
+
+  function renderAlertRow(alert, idx) {
+    const tr = document.createElement('tr');
+    tr.className = 'alert-row';
+    tr.dataset.idx = idx;
+
+    const timeTd = document.createElement('td');
+    timeTd.textContent = fmtTime(alert.time);
+
+    const nodeTd = document.createElement('td');
+    nodeTd.textContent = alert.node || '-';
+
+    const typeTd = document.createElement('td');
+    typeTd.textContent = alert.type || '-';
+
+    const sevTd = document.createElement('td');
+    sevTd.textContent = alert.severity || '-';
+
+    tr.appendChild(timeTd);
+    tr.appendChild(nodeTd);
+    tr.appendChild(typeTd);
+    tr.appendChild(sevTd);
+
+    tr.addEventListener('click', () => {
+      document.querySelectorAll('#alerts-tbody tr.selected').forEach(r => r.classList.remove('selected'));
+      tr.classList.add('selected');
+      showAlertInModal(alert);
+    });
+
+    return tr;
+  }
+
+  function showAlertInModal(alert) {
+    // populate modal pre so user can open detail modal if they want
+    if (!modalDetailEl) return;
+    let text = '';
+    text += `Time: ${fmtTime(alert.time)}\n`;
+    text += `Node: ${alert.node || '-'}\n`;
+    text += `Type: ${alert.type || '-'}\n`;
+    text += `Severity: ${alert.severity || '-'}\n\n`;
+    if (alert.details) text += `Details:\n${alert.details}\n\n`;
+    if (alert.report) {
+      const reportFilename = alert.report.split('/').slice(-1)[0];
+      const reportUrl = `/reports/${reportFilename}`;
+      text += `Report URL: ${reportUrl}\n`;
+    }
+    if (alert.scan) text += `Raw scan:\n${JSON.stringify(alert.scan, null, 2)}\n`;
+    modalDetailEl.textContent = text;
+
+    // Show bootstrap modal
+    const myModal = new bootstrap.Modal(document.getElementById('alertModal'));
+    myModal.show();
+  }
+
+  async function fetchAndRenderAlerts() {
+    if (!alertsTbody) return;
+    try {
+      const res = await fetch('/api/alerts');
+      if (!res.ok) {
+        console.warn('Failed to fetch /api/alerts', res.status);
+        return;
+      }
+      const alerts = await res.json();
+
+      alertsTbody.innerHTML = '';
+
+      if (!Array.isArray(alerts) || alerts.length === 0) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 4;
+        td.className = 'text-muted';
+        td.textContent = 'No live alerts';
+        tr.appendChild(td);
+        alertsTbody.appendChild(tr);
+        return;
+      }
+
+      // render newest first
+      alerts.forEach((alert, i) => {
+        const tr = renderAlertRow(alert, i);
+        alertsTbody.appendChild(tr);
+      });
+
+      // set last-update timestamp
+      const lastUpd = document.getElementById('alerts-last-update');
+      if (lastUpd) lastUpd.textContent = `Updated: ${new Date().toLocaleTimeString()}`;
+
+    } catch (err) {
+      console.error('Error fetching alerts:', err);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    fetchAndRenderAlerts();
+    setInterval(fetchAndRenderAlerts, ALERTS_POLL_INTERVAL_MS);
+  });
+</script>
+
+<script>
+  // ---------- Center Node Vulnerabilities rendering ----------
+  async function renderCenterNodeVulns() {
+    const container = document.getElementById('center-node-vulns');
+    if (!container) return;
+
+    try {
+      const res = await fetch('/api/nodes');
+      if (!res.ok) {
+        container.innerHTML = `<p class="text-danger">Failed to load nodes (status ${res.status})</p>`;
+        return;
+      }
+      const nodes = await res.json();
+
+      if (!Array.isArray(nodes) || nodes.length === 0) {
+        container.innerHTML = `<p class="text-muted">No nodes configured.</p>`;
+        return;
+      }
+
+      let html = '<div class="list-group">';
+      nodes.forEach(node => {
+        const vulnCount = (node.vulnerabilities || []).length;
+        html += `
+          <div class="list-group-item">
+            <div class="d-flex justify-content-between align-items-start">
+              <div>
+                <strong>${node.name}</strong> <small class="text-muted">(${node.ip})</small>
+                <div class="small text-muted mt-1">${vulnCount} findings</div>
+              </div>
+              <div class="text-end">
+                <span class="badge bg-secondary">${vulnCount}</span>
+              </div>
+            </div>
+            <div class="mt-2">`;
+        if (vulnCount === 0) {
+          html += `<div class="text-muted small">No findings</div>`;
+        } else {
+          html += `<ul class="mb-0">`;
+          (node.vulnerabilities || []).forEach(v => {
+            const svc = v.service || 'unknown';
+            const port = v.port || '';
+            const desc = v.desc || '';
+            const ver = v.version ? ` ${v.version}` : '';
+            html += `<li>${port} ${svc}${ver} — ${desc}</li>`;
+          });
+          html += `</ul>`;
+        }
+        html += `</div></div>`;
+      });
+      html += '</div>';
+
+      container.innerHTML = html;
+
+    } catch (err) {
+      console.error('Error loading node vulnerabilities', err);
+      container.innerHTML = `<p class="text-danger">Error loading data</p>`;
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    renderCenterNodeVulns();
+    // refresh every 20s
+    setInterval(renderCenterNodeVulns, 20000);
+  });
+</script>
+
+<script>
+/* ---------- Charts: Attacks Over Time & Vulnerability Map ---------- */
+/* Requires Chart.js (already loaded in your head) */
+
+(async function() {
+  // DOM elements
+  const attackCanvas = document.getElementById('attackChart');
+  const vulnCanvas  = document.getElementById('vulnChart');
+
+  if (!attackCanvas || !vulnCanvas) {
+    console.warn("Chart canvases not found.");
+    return;
+  }
+
+  // Chart instances (will be set after first fetch)
+  let attackChart = null;
+  let vulnChart = null;
+
+  // Chart config templates
+  function createAttackChart(labels, counts) {
+    const ctx = attackCanvas.getContext('2d');
+    return new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Attacks',
+          data: counts,
+          fill: true,
+          tension: 0.25,
+          pointRadius: 3,
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { display: true, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { precision:0 } }
+        },
+        plugins: { legend: { display: false }, tooltip: { mode: 'index' } }
+      }
+    });
+  }
+
+  function createVulnChart(nodes, counts) {
+    const ctx = vulnCanvas.getContext('2d');
+    return new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: nodes,
+        datasets: [{
+          label: 'Vulnerabilities',
+          data: counts,
+          borderWidth: 1,
+          barPercentage: 0.7,
+          categoryPercentage: 0.7
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { beginAtZero: true, ticks: { precision:0 } },
+          y: { grid: { display: false } }
+        },
+        plugins: { legend: { display: false }, tooltip: { mode: 'nearest' } }
+      }
+    });
+  }
+
+  // Update chart data (in-place) so Chart.js re-uses instances
+  function updateAttackChart(chart, labels, counts) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = counts;
+    chart.update();
+  }
+  function updateVulnChart(chart, nodes, counts) {
+    chart.data.labels = nodes;
+    chart.data.datasets[0].data = counts;
+    chart.update();
+  }
+
+  // Fetch summary and (re)render charts
+  async function fetchAndRenderCharts() {
+    try {
+      const res = await fetch('/api/summary');
+      if (!res.ok) {
+        console.warn('Failed to fetch /api/summary', res.status);
+        return;
+      }
+      const summary = await res.json();
+
+      // Extract attacks_over_time
+      const a = summary.attacks_over_time || {};
+      const labels = Array.isArray(a.labels) ? a.labels : [];
+      const counts = Array.isArray(a.counts) ? a.counts : [];
+
+      // Extract vuln_by_node
+      const v = summary.vuln_by_node || {};
+      const nodes = Array.isArray(v.nodes) ? v.nodes : [];
+      const vulnCounts = Array.isArray(v.counts) ? v.counts : [];
+
+      // If no chart instances yet, create them
+      if (!attackChart) attackChart = createAttackChart(labels, counts);
+      else updateAttackChart(attackChart, labels, counts);
+
+      if (!vulnChart) vulnChart = createVulnChart(nodes, vulnCounts);
+      else updateVulnChart(vulnChart, nodes, vulnCounts);
+
+    } catch (err) {
+      console.error('Error updating charts:', err);
+    }
+  }
+
+  // Initial render + periodic refresh
+  await fetchAndRenderCharts();
+  // refresh every 30 seconds
+  setInterval(fetchAndRenderCharts, 30000);
+
+  // Make sure the canvas containers have a height so Chart.js can render
+  // if you use responsive layout, set explicit container height in CSS (example below)
+  // Example: document.getElementById('attackChart').parentElement.style.height = '220px';
+  attackCanvas.parentElement.style.height = attackCanvas.parentElement.style.height || '220px';
+  vulnCanvas.parentElement.style.height = vulnCanvas.parentElement.style.height || '220px';
+
+})();
+</script>
+
+
 </body>
 </html>
-
-
-

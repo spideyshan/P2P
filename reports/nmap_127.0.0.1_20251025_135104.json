@@ -1,0 +1,11 @@
+{
+  "ip": "127.0.0.1",
+  "open": [
+    {
+      "port": 22,
+      "service": "ssh",
+      "version": "10.0",
+      "extra": "protocol 2.0"
+    }
+  ]
+}

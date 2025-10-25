@@ -1,0 +1,41 @@
+{
+  "ip": "192.168.1.1",
+  "open": [
+    {
+      "port": 53,
+      "service": "domain",
+      "version": "2.84rc2",
+      "extra": ""
+    },
+    {
+      "port": 80,
+      "service": "http",
+      "version": "1.30 26Oct2018",
+      "extra": ""
+    },
+    {
+      "port": 139,
+      "service": "microsoft-ds",
+      "version": "",
+      "extra": ""
+    },
+    {
+      "port": 443,
+      "service": "https",
+      "version": "",
+      "extra": ""
+    },
+    {
+      "port": 445,
+      "service": "microsoft-ds",
+      "version": "",
+      "extra": ""
+    },
+    {
+      "port": 631,
+      "service": "ipp",
+      "version": "2.2",
+      "extra": ""
+    }
+  ]
+}
