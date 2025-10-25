@@ -2,8 +2,7 @@
 # Advanced Flask Backend for P2P IDS Dashboard (enhanced)
 # - Integrates nmap scanning (python-nmap)
 # - Generates JSON + HTML reports per scan (saved under reports/)
-# - Keeps background scanner, FSM, alerts, summary APIs
-# - Adds optional Scapy-based P2P message capture and API
+# - Keeps background scanner, FSM, alerts, and summary APIs
 # ==============================================================
 
 import os
@@ -16,13 +15,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_from_directory, abort
 import logging
-
-# Try to import scapy — optional (import all needed symbols here)
-try:
-    from scapy.all import sniff, Raw, TCP, UDP, IP, IPv6
-    SCAPY_AVAILABLE = True
-except Exception as e:
-    SCAPY_AVAILABLE = False
 
 # ==============================================================
 # Flask Setup
@@ -352,202 +344,7 @@ def api_alerts():
 
 
 # ==============================================================
-# P2P Message Capture (Scapy-based, improved)
-# ==============================================================
-P2P_MESSAGES = []          # list of recent message previews
-P2P_LOCK = threading.Lock()
-MAX_P2P_MESSAGES = 500
-CAPTURE_PAYLOAD_BYTES = int(os.environ.get("P2P_PAYLOAD_BYTES", "200"))
-
-# Improved decoders and preview helpers
-import binascii
-import base64
-import zlib
-import gzip
-
-try:
-    import bencodepy
-    BENCODE_AVAILABLE = True
-except Exception:
-    BENCODE_AVAILABLE = False
-
-def safe_text_preview(b: bytes, max_chars=300):
-    """Return printable utf-8 preview or short hex fallback."""
-    if not b:
-        return ""
-    try:
-        s = b.decode('utf-8', errors='replace')
-        s = s.replace('\r', '')
-        return s[:max_chars] + ("…" if len(s) > max_chars else "")
-    except Exception:
-        h = binascii.hexlify(b[:max_chars]).decode(errors='ignore')
-        return h + ("…" if len(b) > max_chars else "")
-
-def try_decoders(payload: bytes):
-    """Try utf8, base64 (tail heuristic), zlib, gzip, bencode (if available)."""
-    out = {}
-
-    # UTF-8
-    try:
-        out['utf8'] = {"ok": True, "text": payload.decode('utf-8', errors='replace')}
-    except Exception:
-        out['utf8'] = {"ok": False, "text": safe_text_preview(payload, 500)}
-
-    # base64 heuristic: try last '|' segment then the whole ascii-sanitized
-    def _try_b64(s):
-        try:
-            b = base64.b64decode(s + '===' , validate=True)
-            try:
-                return True, b.decode('utf-8', errors='replace')
-            except Exception:
-                return True, binascii.hexlify(b).decode()
-        except Exception:
-            return False, ''
-
-    b64_ok, b64_text = False, ''
-    try:
-        ascii_text = payload.decode('ascii', errors='ignore')
-        if '|' in ascii_text:
-            tail = ascii_text.split('|')[-1]
-            b64_ok, b64_text = _try_b64(tail)
-        if not b64_ok:
-            candidate = ''.join([c for c in ascii_text if c.isalnum() or c in '+/=\n'])
-            if len(candidate) > 8:
-                b64_ok, b64_text = _try_b64(candidate)
-    except Exception:
-        pass
-    out['base64'] = {"ok": bool(b64_ok), "text": b64_text}
-
-    # zlib
-    try:
-        dec = zlib.decompress(payload)
-        out['zlib'] = {"ok": True, "text": dec.decode('utf-8', errors='replace')}
-    except Exception:
-        out['zlib'] = {"ok": False, "text": ""}
-
-    # gzip
-    try:
-        if payload[:2] == b'\x1f\x8b':
-            dec = gzip.decompress(payload)
-            out['gzip'] = {"ok": True, "text": dec.decode('utf-8', errors='replace')}
-        else:
-            out['gzip'] = {"ok": False, "text": ""}
-    except Exception:
-        out['gzip'] = {"ok": False, "text": ""}
-
-    # bencode
-    if BENCODE_AVAILABLE:
-        try:
-            dec = bencodepy.decode(payload)
-            out['bencode'] = {"ok": True, "text": str(dec)}
-        except Exception:
-            out['bencode'] = {"ok": False, "text": ""}
-    else:
-        out['bencode'] = {"ok": False, "text": ""}
-
-    return out
-
-def p2p_packet_handler(pkt):
-    try:
-        payload = None
-        proto = None
-        sport = None
-        dport = None
-        src = None
-        dst = None
-
-        # Prefer IP/IPv6 addresses
-        if IP in pkt:
-            src = pkt[IP].src
-            dst = pkt[IP].dst
-        elif IPv6 in pkt:
-            src = pkt[IPv6].src
-            dst = pkt[IPv6].dst
-        else:
-            src = getattr(pkt, 'src', None)
-            dst = getattr(pkt, 'dst', None)
-
-        if TCP in pkt and Raw in pkt:
-            proto = "TCP"
-            sport = pkt[TCP].sport
-            dport = pkt[TCP].dport
-            payload = bytes(pkt[Raw].load)[:CAPTURE_PAYLOAD_BYTES]
-        elif UDP in pkt and Raw in pkt:
-            proto = "UDP"
-            sport = pkt[UDP].sport
-            dport = pkt[UDP].dport
-            payload = bytes(pkt[Raw].load)[:CAPTURE_PAYLOAD_BYTES]
-        else:
-            return
-
-        preview = safe_text_preview(payload)
-        hex_dump = binascii.hexlify(payload).decode()
-        decodes = try_decoders(payload)
-
-        record = {
-            "time": datetime.utcnow().isoformat(),
-            "src": src,
-            "sport": int(sport) if sport else None,
-            "dst": dst,
-            "dport": int(dport) if dport else None,
-            "proto": proto,
-            "payload_preview": preview,
-            "payload_hex": hex_dump,
-            "decodes": decodes
-        }
-
-        with P2P_LOCK:
-            P2P_MESSAGES.insert(0, record)
-            if len(P2P_MESSAGES) > MAX_P2P_MESSAGES:
-                P2P_MESSAGES.pop()
-
-        # simple alerting for suspicious keywords in preview
-        lowered = (preview or "").lower()
-        suspicious_keywords = ("password", "passwd", "login", "secret", "token")
-        if any(k in lowered for k in suspicious_keywords):
-            with DATA_LOCK:
-                ALERTS.insert(0, {
-                    "time": datetime.utcnow().isoformat(),
-                    "node": record.get("src") or record.get("dst") or "unknown",
-                    "type": "P2P Message Suspicious",
-                    "severity": "High",
-                    "details": f"Suspicious payload on {proto} {record.get('src')}:{record.get('sport')} -> {record.get('dst')}:{record.get('dport')}",
-                    "payload_preview": preview
-                })
-
-    except Exception as e:
-        app.logger.debug("P2P capture handler error (improved): %s", e)
-
-def start_p2p_sniffer(interface=None, bpf_filter=None):
-    """
-    Start scapy sniffer in background thread.
-    interface: e.g., 'eth0' or None for default
-    bpf_filter: string like 'tcp port 6881 or udp port 6881' or 'tcp' or 'host 192.168.1.249'
-    """
-    if not SCAPY_AVAILABLE:
-        app.logger.warning("[P2P-SNIFFER] Scapy not available; P2P capture disabled.")
-        return
-
-    def worker():
-        app.logger.info("[P2P-SNIFFER] Starting on %s filter=%s", interface or "default", bpf_filter)
-        try:
-            sniff(iface=interface, prn=p2p_packet_handler, store=False, filter=bpf_filter)
-        except Exception as e:
-            app.logger.exception("[P2P-SNIFFER] Sniffer stopped: %s", e)
-
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    app.logger.info("[P2P-SNIFFER] Thread started")
-
-@app.route('/api/p2p_messages')
-def api_p2p_messages():
-    with P2P_LOCK:
-        # return top N entries
-        return jsonify(P2P_MESSAGES[:200])
-
-
-# ==============================================================
-# Summary endpoint (enhanced) - aggregates real alerts into timeline
+# Summary endpoint (enhanced) - replaces your old api_summary
 # ==============================================================
 
 def severity_of_vuln(v):
@@ -574,42 +371,15 @@ def severity_of_vuln(v):
 def api_summary():
     """
     Generate vulnerability + attack summary for charts and summary panel.
-    Attacks over time are computed from ALERTS (real data).
     """
-    # Build time labels for the last 13 minutes (including current minute)
-    times = [datetime.utcnow() - timedelta(minutes=i) for i in range(12, -1, -1)]
-    labels = [t.strftime("%H:%M") for t in times]
-    attack_counts = {label: 0 for label in labels}
+    labels = [(datetime.utcnow() - timedelta(minutes=i)).strftime("%H:%M") for i in range(12, -1, -1)]
+    attacks = [random.randint(0, 2) for _ in labels]
 
     total_findings = 0
     severity_counts = {"low": 0, "medium": 0, "high": 0}
     vuln_by_node_counts = []
 
     with DATA_LOCK:
-        # aggregate alerts into minute buckets (robust ISO parsing)
-        for alert in ALERTS:
-            ts = alert.get("time")
-            if not ts:
-                continue
-            try:
-                # Accept full ISO format; handle trailing 'Z' (UTC) -> +00:00 for fromisoformat
-                ts_val = ts
-                if ts_val.endswith('Z'):
-                    ts_val = ts_val[:-1] + '+00:00'
-                alert_time = datetime.fromisoformat(ts_val)
-                label = alert_time.strftime("%H:%M")
-                if label in attack_counts:
-                    attack_counts[label] += 1
-            except Exception:
-                # fallback: try parse with limited slice (best effort)
-                try:
-                    alert_time = datetime.fromisoformat(ts[:19])
-                    label = alert_time.strftime("%H:%M")
-                    if label in attack_counts:
-                        attack_counts[label] += 1
-                except Exception:
-                    continue
-
         for n in NODES:
             vlist = n.get('vulnerabilities', []) or []
             vuln_by_node_counts.append(len(vlist))
@@ -621,7 +391,7 @@ def api_summary():
         node_names = [n['name'] for n in NODES]
 
     return jsonify({
-        "attacks_over_time": {"labels": labels, "counts": list(attack_counts.values())},
+        "attacks_over_time": {"labels": labels, "counts": attacks},
         "vuln_by_node": {"nodes": node_names, "counts": vuln_by_node_counts},
         "vuln_summary": {
             "total_findings": total_findings,
@@ -630,10 +400,10 @@ def api_summary():
     })
 
 
+
 # ==============================================================
 # Report endpoints: list and download generated HTML reports
 # ==============================================================
-
 @app.route('/api/reports')
 def api_reports():
     """Return recent report file names (html)"""
@@ -659,7 +429,6 @@ def serve_report(filename):
 # ==============================================================
 # Main Nmap Scanning Endpoint
 # ==============================================================
-
 @app.route('/api/scan', methods=['POST'])
 def api_scan():
     data = request.get_json(silent=True) or {}
@@ -676,7 +445,6 @@ def api_scan():
 # ==============================================================
 # DEBUG: Direct manual scan endpoint (returns raw scan)
 # ==============================================================
-
 @app.route('/api/scan_now', methods=['POST'])
 def api_scan_now():
     data = request.get_json(silent=True) or {}
@@ -691,7 +459,6 @@ def api_scan_now():
 # ==============================================================
 # Optional helper: trigger FSM state for node by name (convenience)
 # ==============================================================
-
 @app.route('/api/node/state', methods=['POST'])
 def api_node_state():
     data = request.get_json(silent=True) or {}
@@ -710,23 +477,6 @@ def api_node_state():
 if __name__ == '__main__':
     # Start scanner thread only when running as main (not when imported)
     start_scanner_thread(interval_seconds=60)
-
-    # Start P2P sniffer if available and enabled by environment flag (default: enabled if scapy present)
-    start_sniffer = os.environ.get("P2P_CAPTURE", "1").lower() not in ("0", "false", "no")
-    if SCAPY_AVAILABLE and start_sniffer:
-        # default bpf filter can be None for all (you may restrict e.g. "tcp" or "host 192.168.1.249")
-        bpf = os.environ.get("P2P_BPF_FILTER", None)
-        iface = os.environ.get("P2P_IFACE", None)
-        try:
-            start_p2p_sniffer(interface=iface, bpf_filter=bpf)
-        except Exception as e:
-            app.logger.exception("Failed to start P2P sniffer: %s", e)
-    else:
-        if not SCAPY_AVAILABLE:
-            app.logger.warning("Scapy not available — P2P message capture disabled.")
-        else:
-            app.logger.info("P2P capture disabled by environment.")
-
-    app.logger.info("Starting Flask app. Nmap available: %s | Scapy available: %s", NM_AVAILABLE, SCAPY_AVAILABLE)
+    app.logger.info("Starting Flask app. Nmap available: %s", NM_AVAILABLE)
     # bind to 0.0.0.0 for network access; change debug=False for production
     app.run(host='0.0.0.0', port=5001, debug=True)

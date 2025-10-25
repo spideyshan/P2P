@@ -399,8 +399,10 @@
 
 <script>
 /* ---------- Charts: Attacks Over Time & Vulnerability Map ---------- */
+/* Requires Chart.js (already loaded in your head) */
 
 (async function() {
+  // DOM elements
   const attackCanvas = document.getElementById('attackChart');
   const vulnCanvas  = document.getElementById('vulnChart');
 
@@ -409,9 +411,11 @@
     return;
   }
 
+  // Chart instances (will be set after first fetch)
   let attackChart = null;
   let vulnChart = null;
 
+  // Chart config templates
   function createAttackChart(labels, counts) {
     const ctx = attackCanvas.getContext('2d');
     return new Chart(ctx, {
@@ -466,6 +470,7 @@
     });
   }
 
+  // Update chart data (in-place) so Chart.js re-uses instances
   function updateAttackChart(chart, labels, counts) {
     chart.data.labels = labels;
     chart.data.datasets[0].data = counts;
@@ -477,6 +482,7 @@
     chart.update();
   }
 
+  // Fetch summary and (re)render charts
   async function fetchAndRenderCharts() {
     try {
       const res = await fetch('/api/summary');
@@ -486,14 +492,17 @@
       }
       const summary = await res.json();
 
+      // Extract attacks_over_time
       const a = summary.attacks_over_time || {};
       const labels = Array.isArray(a.labels) ? a.labels : [];
       const counts = Array.isArray(a.counts) ? a.counts : [];
 
+      // Extract vuln_by_node
       const v = summary.vuln_by_node || {};
       const nodes = Array.isArray(v.nodes) ? v.nodes : [];
       const vulnCounts = Array.isArray(v.counts) ? v.counts : [];
 
+      // If no chart instances yet, create them
       if (!attackChart) attackChart = createAttackChart(labels, counts);
       else updateAttackChart(attackChart, labels, counts);
 
@@ -505,7 +514,9 @@
     }
   }
 
+  // Initial render + periodic refresh
   await fetchAndRenderCharts();
+  // refresh every 30 seconds
   setInterval(fetchAndRenderCharts, 30000);
 
 })();
@@ -542,18 +553,7 @@ async function fetchP2PMessages() {
       `;
       li.addEventListener('click', () => {
         const pre = document.getElementById('p2p-modal-pre');
-        let out = '';
-        out += `Time: ${m.time}\nSrc: ${m.src}:${m.sport}\nDst: ${m.dst}:${m.dport}\nProto: ${m.proto}\n\n`;
-        out += `--- Preview ---\n${m.payload_preview || ''}\n\n`;
-        out += `--- Hex (first 2000 chars) ---\n${(m.payload_hex || '').slice(0,2000)}\n\n`;
-        if (m.decodes) {
-          out += `--- Decoder Attempts ---\n`;
-          Object.entries(m.decodes).forEach(([k,v]) => {
-            out += `${k.toUpperCase()} : ${v.ok ? 'OK' : 'FAIL'}\n`;
-            if (v.text) out += `${v.text}\n\n`;
-          });
-        }
-        pre.textContent = out;
+        pre.textContent = `Time: ${m.time}\nSrc: ${m.src}:${m.sport}\nDst: ${m.dst}:${m.dport}\nProto: ${m.proto}\n\nPayload preview:\n${m.payload_preview || ''}`;
         const modal = new bootstrap.Modal(document.getElementById('p2pModal'));
         modal.show();
       });
